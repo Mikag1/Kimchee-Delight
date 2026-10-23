@@ -1,0 +1,28 @@
+CREATE DATABASE IF NOT EXISTS samgyutrack CHARACTER SET utf8mb4;
+USE samgyutrack;
+
+CREATE TABLE IF NOT EXISTS daily_consumption (
+  id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  business_date DATE NOT NULL UNIQUE,
+  customers INT UNSIGNED NOT NULL DEFAULT 0,
+  pork_kg DECIMAL(8,2) NOT NULL DEFAULT 0,
+  beef_kg DECIMAL(8,2) NOT NULL DEFAULT 0,
+  chicken_kg DECIMAL(8,2) NOT NULL DEFAULT 0,
+  other_kg DECIMAL(8,2) NOT NULL DEFAULT 0,
+  revenue DECIMAL(12,2) NOT NULL DEFAULT 0,
+  meat_cost DECIMAL(12,2) NOT NULL DEFAULT 0,
+  other_expenses DECIMAL(12,2) NOT NULL DEFAULT 0,
+  is_sample TINYINT(1) NOT NULL DEFAULT 0,  -- 1 = demo data, 0 = recorded by staff
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Sample rows for the last 7 days (flagged is_sample = 1)
+INSERT INTO daily_consumption (business_date,customers,pork_kg,beef_kg,chicken_kg,other_kg,revenue,meat_cost,other_expenses,is_sample) VALUES
+(CURDATE() - INTERVAL 6 DAY, 88,26,13,7,2.5,39512,16200,6000,1),
+(CURDATE() - INTERVAL 5 DAY,102,30,16,8,3,45798,18900,6500,1),
+(CURDATE() - INTERVAL 4 DAY, 75,21,11,6,2,33675,13400,5200,1),
+(CURDATE() - INTERVAL 3 DAY,120,36,20,9,4,53880,22800,7400,1),
+(CURDATE() - INTERVAL 2 DAY,134,40,22,10,4.5,60166,25300,8000,1),
+(CURDATE() - INTERVAL 1 DAY,110,33,17,9,3,49390,20600,6900,1),
+(CURDATE(),                  97,29,15,8,3,43553,18100,6300,1);

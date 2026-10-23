@@ -1,15 +1,110 @@
-<?php require 'includes/layout.php'; page_start('Orders (Staff)', 'orders'); ?>
-<p class="note">Orders are shared with customer devices and staff through the database. Marking an order served saves its status only; record stock usage separately in Inventory.</p>
-<div id="order-message"></div>
-<div class="card"><h2>Customer QR ordering</h2>
-  <p>Each table would get its own QR code pointing to <code>order.php?table=N</code>. Try it:</p>
-  <label style="max-width:160px">Table number<input id="tn" type="number" min="1" max="30" value="5"></label><br>
-  <a class="btn" id="open" target="_blank" href="order.php?table=5" style="display:inline-block;text-decoration:none">Open customer view</a></div>
-<div class="card"><h2>Order queue</h2><div class="tw"><table><thead><tr><th>Table</th><th>Items</th><th>Type</th><th>Submitted</th><th>Status</th><th></th></tr></thead><tbody id="o"></tbody></table></div></div>
-<dialog id="order-dialog" class="order-dialog" aria-labelledby="dialog-title">
-  <div class="dialog-header"><div><p class="eyebrow">TABLE <span id="dialog-table"></span> · <span id="dialog-type"></span></p><h2 id="dialog-title">Order checklist</h2></div><button class="icon-btn" id="dialog-close" type="button" aria-label="Close checklist">×</button></div>
-  <p class="dialog-hint">Check off each item as you prepare it. Your progress is saved so you can come back to this list.</p>
-  <div id="dialog-items" class="checklist"></div>
-  <div class="dialog-footer"><span id="dialog-progress" class="dialog-progress"></span><button class="btn" id="dialog-done" type="button">Done</button></div>
-</dialog>
-<?php page_end('orders.js?v=10'); ?>
+<?php
+require __DIR__ . '/../config/database.php';
+header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
+
+function orders_out($data, int $status = 200): void {
+    http_response_code($status);
+    echo json_encode($data);
+    exit;
+}
+
+try {
+    $pdo = db();
+    $method = $_SERVER['REQUEST_METHOD'];
+
+    if ($method === 'GET') {
+        $rows = $pdo->query("SELECT id, table_number AS `table`, items, order_type AS type, status,
+                                    checked_items, DATE_FORMAT(created_at, '%H:%i') AS `time`
+                             FROM orders ORDER BY created_at DESC, id DESC")->fetchAll();
+        foreach ($rows as &$row) {
+            $row['id'] = (int)$row['id'];
+            $row['table'] = (int)$row['table'];
+            $row['checkedItems'] = json_decode($row['checked_items'], true) ?: [];
+            unset($row['checked_items']);
+        }
+        unset($row);
+        orders_out(['orders' => $rows]);
+    }
+
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($input)) orders_out(['errors' => ['Invalid request body.']], 400);
+
+    if ($method === 'POST') {
+        $requested = $input['orders'] ?? [];
+        if (!is_array($requested) || !$requested || count($requested) > 2) {
+            orders_out(['errors' => ['Submit one order and optionally one refill at a time.']], 422);
+        }
+        $clean = [];
+        foreach ($requested as $order) {
+            if (!is_array($order)) orders_out(['errors' => ['Invalid order.']], 422);
+            $table = filter_var($order['table'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1, 'max_range' => 99]]);
+            $type = $order['type'] ?? '';
+            $items = trim((string)($order['items'] ?? ''));
+            if ($table === false || !in_array($type, ['Order', 'Refill'], true) || $items === '' || strlen($items) > 2000) {
+                orders_out(['errors' => ['Each order needs a valid table, type, and item list.']], 422);
+            }
+            $clean[] = [$table, $items, $type];
+        }
+
+        $pdo->beginTransaction();
+        $insert = $pdo->prepare('INSERT INTO orders (table_number, items, order_type, status, checked_items) VALUES (?, ?, ?, ?, ?)');
+        $ids = [];
+        foreach ($clean as [$table, $items, $type]) {
+            $insert->execute([$table, $items, $type, 'Pending', '[]']);
+            $ids[] = (int)$pdo->lastInsertId();
+        }
+        $pdo->commit();
+        orders_out(['ok' => true, 'ids' => $ids], 201);
+    }
+
+    $id = filter_var($_GET['id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+    if ($method !== 'PUT' || $id === false) {
+        orders_out(['errors' => ['Unsupported request.']], 405);
+    }
+
+    if (($input['action'] ?? '') === 'checklist') {
+        $checked = $input['checkedItems'] ?? null;
+        if (!is_array($checked)) orders_out(['errors' => ['Checklist must be a list.']], 422);
+        $checked = array_values(array_unique(array_filter($checked, static function ($value) {
+            return filter_var($value, FILTER_VALIDATE_INT) !== false && (int)$value >= 0;
+        })));
+        $statement = $pdo->prepare('UPDATE orders SET checked_items = ? WHERE id = ?');
+        $statement->execute([json_encode($checked), $id]);
+        if (!$statement->rowCount()) {
+            $exists = $pdo->prepare('SELECT 1 FROM orders WHERE id = ?');
+            $exists->execute([$id]);
+            if (!$exists->fetchColumn()) orders_out(['errors' => ['Order not found.']], 404);
+        }
+        orders_out(['ok' => true]);
+    }
+
+    if (($input['action'] ?? '') !== 'status' || !in_array($input['status'] ?? '', ['Preparing', 'Served'], true)) {
+        orders_out(['errors' => ['Invalid order update.']], 422);
+    }
+    $pdo->beginTransaction();
+    $statement = $pdo->prepare('SELECT status FROM orders WHERE id = ? FOR UPDATE');
+    $statement->execute([$id]);
+    $current = $statement->fetchColumn();
+    if ($current === false) {
+        $pdo->rollBack();
+        orders_out(['errors' => ['Order not found.']], 404);
+    }
+    $next = $input['status'];
+    $allowed = ($current === 'Pending' && $next === 'Preparing')
+        || ($current === 'Preparing' && $next === 'Served')
+        || $current === $next;
+    if (!$allowed) {
+        $pdo->rollBack();
+        orders_out(['errors' => ['Order status has changed. Refresh the order list and try again.']], 409);
+    }
+    if ($current !== $next) {
+        $statement = $pdo->prepare('UPDATE orders SET status = ? WHERE id = ?');
+        $statement->execute([$next, $id]);
+    }
+    $pdo->commit();
+    orders_out(['ok' => true]);
+} catch (PDOException $e) {
+    if (isset($pdo) && $pdo->inTransaction()) $pdo->rollBack();
+    orders_out(['errors' => ['Order service database error. Run database/inventory_orders.sql and check config/database.php.']], 500);
+}
